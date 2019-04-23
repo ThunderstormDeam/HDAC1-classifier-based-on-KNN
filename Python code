@@ -35,10 +35,8 @@ path = r'D:\Data_ML\test\HDAC1.csv'
 #获取文件路径
 filepath,fullflname = os.path.split(path)
 
-#导入文件i
-#df_rawdata = pd.read_csv(path)
-df_abc = pd.read_csv(path) 
-df_rawdata = df_abc.sample(n = 100)
+#导入文件
+df_rawdata = pd.read_csv(path)
 
 #置信度筛选
 df_rawdata = df_rawdata[df_rawdata['CONFIDENCE_SCORE']>=4]  
