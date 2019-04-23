@@ -1,9 +1,9 @@
 # HDAC1-classifier-based-on-KNN
-用于建立和评估预测HDAC1分子活性的knn模型的全部流程代码
+Python code for constraction and evaluation of classifiers of bioactivity of HDAC1 compounds bsed on KNN. 
 
-## 内容说明
-本代码包含5个主要部分：数据预处理、指纹计算、分子特征描述符计算、特征描述符特征选取、模型训练和评估
+## INTRODUCTION
+Five steps are involved, including preprocessing, compuction of fingerprints, compuction of molecular descriptors, feature selection of descriptors, constraction and evaluation of KNN models 
 
-## 使用说明
-1.python版本：2.7<br>2.需要安装的第三方库：pandas、numpy、scikitlearn、Rdkit、Chemopy
-<br>3.运行代码前，需要在导入数据集出将csv文件的目标路径输入
+## USAGE
+1.Version of python ：2.7<br>2.Packaegs：pandas、numpy、scikitlearn、Rdkit、Chemopy
+<br>3.Prior to run the program, the filepath of data file with suffix .csv need to be added.
