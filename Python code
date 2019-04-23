@@ -1,0 +1,442 @@
+# -*- coding: utf-8 -*-
+import re
+import os
+import pandas as pd
+import numpy as np
+from scipy.stats import pearsonr
+from pychem import constitution
+from pychem import  pychem 
+from pychem.pychem import Chem 
+from pychem import constitution
+from pychem.pychem import Chem 
+from pychem import fingerprint
+from pychem import basak
+from pychem import bcut
+from pychem import moe
+from datetime import datetime
+from sklearn.feature_selection import RFECV
+from sklearn.svm import SVR
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import train_test_split
+from sklearn import preprocessing
+from sklearn.externals import joblib
+from sklearn import metrics
+import matplotlib.pyplot as plt
+
+print 'Start Time : ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+starttime = datetime.now()
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#数据预处理
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+print 'preprocessing'
+#导入数据集
+path = r'D:\Data_ML\test\HDAC1.csv'
+#获取文件路径
+filepath,fullflname = os.path.split(path)
+
+#导入文件i
+#df_rawdata = pd.read_csv(path)
+df_abc = pd.read_csv(path) 
+df_rawdata = df_abc.sample(n = 100)
+
+#置信度筛选
+df_rawdata = df_rawdata[df_rawdata['CONFIDENCE_SCORE']>=4]  
+#剔除空值数据
+if df_rawdata['CANONICAL_SMILES'].isnull().any() == True:
+    df_rawdata.dropna(subset = ['CANONICAL_SMILES'],how = 'any',inplace = True)
+if df_rawdata['STANDARD_VALUE'].isnull().any() == True:
+    df_rawdata.dropna(subset = ['STANDARD_VALUE'],how = 'any',inplace = True)
+#筛选列标签
+df_selectdata = df_rawdata[['CANONICAL_SMILES','STANDARD_VALUE']]
+
+#去重
+df_sort = df_selectdata.sort_values('STANDARD_VALUE',ascending = True)
+df_diverse = df_sort.drop_duplicates('CANONICAL_SMILES','first')
+df_diverse.reset_index(drop = True,inplace=True)
+#筛选active分子和inactive分子
+df_active   = df_diverse[df_diverse['STANDARD_VALUE']<=1000]  
+df_inactive = df_diverse[df_diverse['STANDARD_VALUE']>1000]  
+
+#计算active分子的Mw和RBs
+df_active_smiles = df_active['CANONICAL_SMILES']  
+list_active_smiles = list(df_active_smiles)
+MW_active_smiles   = []
+RBs_active_smiles  = []
+for i in range(0,len(list_active_smiles)):
+    mol = pychem.Chem.MolFromSmiles(list_active_smiles[i])
+    mw  = constitution.CalculateMolWeight(mol)
+    rbs = constitution.CalculateRotationBondNumber(mol)
+    MW_active_smiles.append(mw)
+    RBs_active_smiles.append(rbs) 
+list_type_active = [1 for i in range(0,len(list_active_smiles))]
+df_active_SMR = pd.DataFrame(list_active_smiles,columns = ['SMILES'])
+df_active_SMR.insert(1,'Type',list_type_active)
+df_active_SMR.insert(2,'MW',MW_active_smiles)
+df_active_SMR.insert(3,'RBs',RBs_active_smiles)
+df_active_SMR.insert(4,'IC50',list(df_active['STANDARD_VALUE']))
+
+#计算inactive分子的Mw和RBs
+df_inactive_smiles = df_inactive['CANONICAL_SMILES']  
+list_inactive_smiles = list(df_inactive_smiles)
+MW_inactive_smiles   = []
+RBs_inactive_smiles  = []
+for i in range(0,len(list_inactive_smiles)):
+    mol = pychem.Chem.MolFromSmiles(list_inactive_smiles[i])
+    mw  = constitution.CalculateMolWeight(mol)
+    rbs = constitution.CalculateRotationBondNumber(mol)
+    MW_inactive_smiles.append(mw)
+    RBs_inactive_smiles.append(rbs) 
+list_type_inactive = [0 for i in range(0,len(list_inactive_smiles))]
+df_inactive_SMR = pd.DataFrame(list_inactive_smiles,columns = ['SMILES'])
+df_inactive_SMR.insert(1,'Type',list_type_inactive)
+df_inactive_SMR.insert(2,'MW',MW_inactive_smiles)
+df_inactive_SMR.insert(3,'RBs',RBs_inactive_smiles)
+df_inactive_SMR.insert(4,'IC50',list(df_inactive['STANDARD_VALUE']))
+
+#筛选 MW<600&RB≤20
+df_active_filter = df_active_SMR[(df_active_SMR['MW']<=600)&(df_active_SMR['RBs']<=20)][['SMILES','Type','IC50']]
+df_inactive_filter = df_inactive_SMR[(df_inactive_SMR['MW']<=600)&(df_inactive_SMR['RBs']<=20)][['SMILES','Type','IC50']]
+
+#合并
+df_data_filter = df_active_filter.append(df_inactive_filter)
+df_data_filter.reset_index(drop=True, inplace=True) 
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#计算指纹
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+print 'computing fingerprints'
+#计算fingerprint的函数，此处计算两种指纹：MACCS fingerprints 和 E-state fingerprints
+def Fingerprints_compute(Smi):
+    mol = pychem.Chem.MolFromSmiles(Smi)
+    #计算指纹
+    MACCS_fingerprints = fingerprint.CalculateMACCSFingerprint(mol)[1:-1]
+    Estate_fingerprints = fingerprint.CalculateEstateFingerprint(mol)[1:3]
+    return(MACCS_fingerprints,Estate_fingerprints) 
+
+#计算指纹
+def Compute(df):
+    length = len(df)
+    List_smiles = list(df['SMILES'])
+    List_type = df['Type']
+    List_Ic   = df['IC50']
+
+    List_maacs  = []
+    List_estate = []
+    for i in range(0,length):
+        smi = List_smiles[i]
+        figerprints = Fingerprints_compute(smi) 
+        maccs_figerprints = figerprints[0]
+        estate_figerprints = figerprints[1]
+        List_maacs.append([List_type[i],List_Ic[i],maccs_figerprints])
+        List_estate.append([List_type[i],List_Ic[i],estate_figerprints])
+    df_smiles_maacs  =  pd.DataFrame(List_maacs ,columns = ['Type','IC50','MACCS_fingerprints'] )
+    df_smiles_estate =  pd.DataFrame(List_estate,columns = ['Type','IC50','Estate_fingerprints'])
+    return(df_smiles_maacs,df_smiles_estate)
+
+def Compute_all(data_filter):
+    fingerprints = Compute(data_filter)
+    df_maccs  = fingerprints[0]
+    df_estate = fingerprints[1]
+
+    #进一步处理
+    List_type_maccs = df_maccs['Type']
+    List_Ic_maccs   = df_maccs['IC50']
+    All_maccs = []
+
+    for i in range(0,len(df_maccs)):
+        maccs = eval(str(df_maccs.iloc[i,2]).strip('(').strip(')').strip(','))
+        All_maccs.append(maccs)    
+    df_maccs_p = pd.DataFrame(All_maccs)
+    df_maccs_p.fillna(0,inplace = True)
+    df_maccs_p.insert(0,'Type',List_type_maccs)
+    df_maccs_p.insert(1,'IC50',List_Ic_maccs)
+
+    List_type_estate = df_estate['Type']
+    List_Ic_estate   = df_estate['IC50']
+    All_estate = []
+    for i in range(0,len(df_estate)):
+        estate = eval('{' + str(df_estate.iloc[i,2]).strip('(').strip(')').replace('{','').replace('}','') + '}')
+        All_estate.append(estate)        
+    df_estate_p = pd.DataFrame(All_estate)
+    df_estate_p.fillna(0,inplace = True)
+    df_estate_p.insert(0,'Type',List_type_estate)
+    df_estate_p.insert(1,'IC50',List_Ic_estate)
+
+    #导出
+    maccs_ex_path = filepath + '/MACCS.csv'
+    estate_ex_path = filepath + '/ESTATE.csv' 
+    df_maccs_p.to_csv(maccs_ex_path,index = None)
+    df_estate_p.to_csv(estate_ex_path,index = None)
+        
+#计算 
+Compute_all(df_data_filter)
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#数据预处理
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+print 'computing descriptors'
+#constitutional descriptors, Basak descriptors, Burden descriptors,and MOE-type descriptors
+def Compute_descriptor(smi):
+    mol = pychem.Chem.MolFromSmiles(smi)
+    descriptors = []
+    values = []
+
+    #Constitutional descriptors (30)
+    Constitutional_descriptors = constitution.GetConstitutional(mol)
+    descriptors_Constitution = list(Constitutional_descriptors.keys())
+    Constitution_values = list(Constitutional_descriptors.values())
+    descriptors.extend(descriptors_Constitution)
+    values.extend(Constitution_values)
+   
+    #Basak descriptors(21)
+    basak_descriptors = basak.Getbasak(mol)
+    descriptors_basak = list(basak_descriptors.keys())
+    basak_values = list(basak_descriptors.values())
+    descriptors.extend(descriptors_basak)
+    values.extend(basak_values)
+
+    #Burden descriptors(64)
+    Burden_descriptors = bcut.GetBurden(mol)
+    descriptors_Burden = list(Burden_descriptors.keys())
+    Burden_values  =  list(Burden_descriptors.values())
+    descriptors.extend(descriptors_Burden)
+    values.extend(Burden_values)
+
+    #MOE-type descriptors(60)
+    MOE_descriptors = moe.GetMOE(mol)
+    descriptors_MOE = list(MOE_descriptors.keys())
+    MOE_values  =  list(MOE_descriptors.values())
+    descriptors.extend(descriptors_MOE)
+    values.extend(MOE_values)
+    return(descriptors,values)
+
+def Compute(data_filter):
+    df_smiles = data_filter
+    List_smiles = list(df_smiles['SMILES']) #
+    List_IC = list(df_smiles['IC50'])
+    List_type = list(df_smiles['Type'])
+    List_smiles_len = len(List_smiles)
+    #获取descriptor作为列名
+    smi0 = List_smiles[0] 
+    List_descriptors = Compute_descriptor(smi0)[0]
+    #获取每个样本的descriptor值
+    List_values = []
+    for i in range(0,List_smiles_len):
+        print i
+        smi = List_smiles[i]
+        descriptors_values = Compute_descriptor(smi)
+        values = descriptors_values[1]
+        List_values.append(values)
+    df_descriptors = pd.DataFrame(data = List_values,columns = List_descriptors)
+    df_descriptors.insert(0,'Type',List_type)
+    df_descriptors.insert(1,'IC50',List_IC )
+    #返回计算结果
+    return df_descriptors
+
+#计算
+df_descriptors = Compute(df_data_filter)
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#feature selection      用皮尔森相关系数计算属性间的相关性
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+print 'feature selecting'
+#第一步，剔除所有值都小于0.05的属性
+df_descriptors_data = pd.DataFrame(np.array(df_descriptors))
+df_descriptors_data[df_descriptors_data<0.05] = np.nan
+df_descriptors_data.dropna(axis=1, how='all',inplace=True) 
+list_seleted_columns = list(df_descriptors_data.columns.values)
+list_all = [x for x in range(0,df_descriptors.shape[1])]
+List_del = list(set(list_all).difference(set(list_seleted_columns)))
+df_descriptors.drop(df_descriptors.columns[List_del],axis=1,inplace=True)
+
+#################################################
+#第二步，计算各属性与IC50之间的皮尔森相关系数
+df_train = df_descriptors
+
+#获取活性列数据（IC50)
+List_activity = list(df_descriptors['IC50'])
+
+#获取所有列名
+List_columns = list(df_descriptors.columns.values)
+List_del_columns = []
+List_columns_ccs = []
+for i in range(2,len(List_columns)):
+    #获取第i个descriptor的名称
+    descriptor_name = df_descriptors.columns[i]
+    #获取第i个descriptor的数据
+    List_descriptor = df_descriptors[descriptor_name]
+    #计算descriptors与分子活性的相关系数
+    cc = abs(pearsonr(List_activity,List_descriptor)[0])  
+    #若＜0.1则，将该列序号添加加之删除list  
+    if cc < 0.1:
+        List_del_columns.append(i)
+    #若＞0.1则，将该列名和cc值保留
+    if cc >= 0.1:
+        List_columns_ccs.append([descriptor_name,cc])
+
+#将保留的列名个和cc转换成df，并按cc值大小降序排序
+df_descriptors_ccs = pd.DataFrame(List_columns_ccs,columns = ['Descriptors','CCs'])
+df_descriptors_ccs.sort_values(by = ['CCs'],ascending=False,inplace = True)
+df_descriptors_ccs.reset_index(drop=True,inplace = True)
+#从df_descriptors集合中删除cc<0.1的列(descriptor)
+df_descriptors_select1 = df_descriptors.drop(df_descriptors.columns[List_del_columns],axis = 1)
+#计算属性之间的cc值 
+List_descriptors = list(df_descriptors_ccs['Descriptors'])
+#设置最终保留列表
+List_ramain = []
+
+#根据ccs去重,
+while len(List_descriptors) : 
+    #将每次迭代List_descriptors的第一个添加到保留清单
+    descriptor_0 = List_descriptors[0]
+    List_ramain.append(descriptor_0)
+    List_descriptors.remove(descriptor_0)
+    #获取对应列名的数据
+    List_descriptor_0 = list(df_descriptors_select1[descriptor_0])
+    len1 =  len(List_descriptors)
+    #计算第一个descriptor0与其他之间的ccs
+    x = 0        
+    while len(List_descriptors) :   #######这里要考虑到三种情况，被删除数据在 表头、表中以及表尾，会导致不同的结果，要注意
+        #获取第X个descriptor的列名
+        descriptor_x = List_descriptors[x]
+        #获取对应列名的数据
+        List_descriptor_x = list(df_descriptors_select1[descriptor_x])        
+        #calculate CCs between List_descriptors[0]and others
+        cc = abs(pearsonr(List_descriptor_0,List_descriptor_x)[0])
+        #如果cc值大于0.9则将其从List_descriptors中剔除
+        if cc > 0.9:
+            List_descriptors.remove(descriptor_x)
+            print 'del ',descriptor_x
+            if x == len(List_descriptors):     #当被删除数据在尾端时，直接停止
+                break
+            continue         #中间删除数据时，原位置数据被删除，因此直接进行下一轮
+        if x == len(List_descriptors) - 1:     #当循环到表尾时，直接结束
+            break        
+        x = x + 1
+
+df_descriptors_select2 = df_descriptors_select1[List_ramain]
+df_descriptors_CCs = df_descriptors_ccs[df_descriptors_ccs['Descriptors'].isin(List_ramain)]
+df_descriptors_select2.insert(0,'Type',list(df_descriptors['Type']))
+
+CCs_ex_path = filepath + '/CCs.csv'
+df_descriptors_CCs.to_csv(CCs_ex_path,index = None)
+
+
+################################
+#第三步，基于线性支持向量机的十折交叉递归特征选取
+Label = np.array(df_descriptors_select2)[:,0]
+Features = np.array(df_descriptors_select2)[:,1:]
+X = Features
+y = Label
+
+estimator = SVR(kernel='linear')
+selector = RFECV(estimator, step=1, cv = 10, n_jobs=-1 )
+selector = selector.fit(X, y)
+
+#获取所有列名,选取保留的列名
+List_columns = list(df_descriptors_select2.columns.values)
+List_columns_remain = ['Type']
+list_rank = list(selector.ranking_)
+for i in range(0,len(list_rank)):
+    if list_rank[i] == 1:
+        List_columns_remain.append(List_columns[i+1])
+    else:
+        continue
+#获取最终属性输入的数据
+df_descriptors_final = df_descriptors_select2[List_columns_remain]
+print df_descriptors_final
+#导出数据
+des_final_path = filepath + '/descriptors.csv'
+df_descriptors_final.to_csv(des_final_path, index = None)
+
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+#建模以及评估
+#++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+print 'buliding models'
+#提取训练数据
+def build_model(path):
+    #path = r'D:\Data_ML\data3\test\descriptors.csv'
+    filepath,fullflname = os.path.split(path)
+    filename = fullflname.split('.')[0]
+
+    df1 = pd.read_csv(path)
+    df_active = df1[df1['Type']==1]
+    df_inactive = df1[df1['Type']==0]
+    df_data = pd.concat([df_active ,df_inactive])
+
+    X_data = np.array(df_data)[:,1:]       #数据矩阵 
+    y_data = np.array(df_data)[:,0]        #标签列0或1 
+    #划分数据集，random_state 保证每次运行分割的集合里面的数据是一致的
+    #需要归一化
+    X_scaled = preprocessing.scale(X_data)
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y_data, random_state = 2, train_size=0.8)
+
+    #训练模型
+    par ={'n_neighbors': [i for i in range(1, 11)]} 
+    #选择accuracy作为每次搜索时建立模型的评估标准。n_jobs= -1，选择满进程来进行操作
+    knn =  KNeighborsClassifier(weights= 'distance',p = 1)
+    model_knn = GridSearchCV(knn, par, cv = 10 ,scoring='accuracy', n_jobs=-1)
+    model_knn.fit(X_train,y_train)
+
+    #########计算评估参数
+    #输出train set的accuracy
+    y_train_pred = model_knn.predict(X_train)
+    train_accuracy_score = metrics.accuracy_score(y_train,y_train_pred)
+    #输出test set的数据
+    y_test_pred = model_knn.predict(X_test)
+    #准确度
+    test_accuracy_score = metrics.accuracy_score(y_test,y_test_pred)
+    #混淆矩阵
+    cm = metrics.confusion_matrix(y_test,y_test_pred)
+    #由于scilearn中混淆矩阵默认0为正，但是我们默认1为正，因此求se和sp与其计算相反
+    #敏感度（召回率），针对活性分子
+    test_SE = cm[1,1]/(cm[1,0]+cm[1,1])
+    #特异度，针对非活性分子
+    test_specificity = cm[0,0]/(cm[0,0]+cm[0,1])
+    #马修斯相关系数
+    test_matthews_corrcoef = metrics.matthews_corrcoef(y_test,y_test_pred)
+    #roc_auc
+    test_probas_ = model_knn.predict_proba(X_test)
+    test_fpr, test_tpr, test_thresholds = metrics.roc_curve(y_test, test_probas_[:, 1])
+    test_roc_auc = metrics.auc(test_fpr, test_tpr)
+
+    #######导出评估参数
+    evaluation_file = filepath + '/' + filename + '_evalation.txt'
+    with open(evaluation_file,'w+') as fp1:
+        fp1.write('best_params:' + str(model_knn.best_params_) +'\n' 
+                +'best_score(accuracy):' + str(model_knn.best_score_ ) +'\t'
+                'train_accuracy_score:' + str(train_accuracy_score) + '\n'
+                +'test_accuracy_score: ' + str(test_accuracy_score) + '\t'
+                +'test_SE:' + str(test_SE) +'\t'
+                +'test_SP:' + str(test_specificity) + '\n'
+                +'test_matthews_corrcoef :' +str(test_matthews_corrcoef) +'\n'
+                +'test_roc_auc :' + str(test_roc_auc) +'\n'
+                +'confusion_matrix: ' + str(cm)
+                )
+
+    #将ROC曲线数据存入csv文件
+    list_roc = []
+    list_roc.append(test_fpr)
+    list_roc.append(test_tpr)
+    df_roc = pd.DataFrame(list_roc)
+    roc_path =  filepath + '/' + filename + '_roc.csv'
+    df_roc.to_csv(roc_path)
+
+    #将训练好的最优模型导出
+    model_path = filepath + '/' + filename + '_knn.m'
+    joblib.dump(model_knn,model_path)
+
+#导入数据集训练模型
+des_path = filepath + '/descriptors.csv'
+maccs_path = filepath + '/MACCS.csv'
+estate_path = filepath + '/ESTATE.csv' 
+
+build_model(des_path )
+build_model(maccs_path )
+build_model(estate_path )
+
+
+print 'End Time : ' + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+endtime = datetime.now()
+print 'total time: ' + str((endtime - starttime).seconds) + ' seconds'
